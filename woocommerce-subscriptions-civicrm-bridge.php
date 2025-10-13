@@ -122,7 +122,7 @@ class WCS_CiviCRM_Bridge {
     private function init_hooks() {
         // Hook into renewal order creation
         add_filter( 'wcs_renewal_order_created', array( $this, 'handle_renewal_order_created' ), 10, 2 );
-
+        add_filter( 'wcs_created_subscription', array( $this, 'handle_renewal_order_created' ), 10, 1 );
     }
 
     /**
@@ -132,9 +132,9 @@ class WCS_CiviCRM_Bridge {
      * @param WC_Subscription $subscription  The subscription object.
      * @return WC_Order The renewal order object (required for filters).
      */
-    public function handle_renewal_order_created( $renewal_order, $subscription ) {
+    public function handle_renewal_order_created( $renewal_order, $subscription = null ) {
         error_log( sprintf( 'WCS CiviCRM Bridge: Called handle_renewal_order_created for renewal order #%d from subscription #%d', 
-        $renewal_order->get_id(), $subscription->get_id() ) );
+        $renewal_order->get_id(), $subscription ? $subscription->get_id() : 'N/A' ) );
         
         // Use WPCV function to create/update contribution
         $contribution = WPCV_WCI()->contribution->create_from_order( $renewal_order );
