@@ -73,9 +73,6 @@ class WCS_CiviCRM_Bridge {
 
         // Initialize hooks.
         $this->init_hooks();
-
-        // Log plugin initialization.
-        error_log( 'WCS CiviCRM Bridge: Plugin initialized successfully' );
     }
 
     /**
