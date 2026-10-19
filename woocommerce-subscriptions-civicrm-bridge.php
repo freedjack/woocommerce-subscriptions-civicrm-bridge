@@ -33,6 +33,13 @@ define( 'WCS_CIVICRM_BRIDGE_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
 class WCS_CiviCRM_Bridge {
 
     /**
+     * CiviCRM contribution id stored on WooCommerce orders.
+     *
+     * @var string
+     */
+    const CONTRIBUTION_META_KEY = '_woocommerce_civicrm_contribution_id';
+
+    /**
      * Single instance of the class.
      *
      * @var WCS_CiviCRM_Bridge
@@ -117,33 +124,112 @@ class WCS_CiviCRM_Bridge {
      * Initialize hooks.
      */
     private function init_hooks() {
-        // Hook into renewal order creation
+        // WPCV only saves CiviCRM product settings for types in this option.
+        // When the option has never been saved, WordPress returns the default
+        // and does not run the option_* filter, so both hooks are required.
+        add_filter( 'option_woocommerce_civicrm_product_types_with_panel', array( $this, 'include_subscription_product_type' ) );
+        add_filter( 'default_option_woocommerce_civicrm_product_types_with_panel', array( $this, 'include_subscription_product_type' ), 20 );
+
+        // Do not copy the parent contribution onto the subscription or its renewals.
+        add_filter( 'wc_subscriptions_subscription_data', array( $this, 'exclude_civicrm_contribution_meta' ) );
+        add_filter( 'wc_subscriptions_renewal_order_data', array( $this, 'exclude_civicrm_contribution_meta' ) );
+
+        // Renewal orders are fully built, including line items, before this fires.
         add_filter( 'wcs_renewal_order_created', array( $this, 'handle_renewal_order_created' ), 10, 2 );
-        add_filter( 'wcs_created_subscription', array( $this, 'handle_renewal_order_created' ), 10, 1 );
     }
 
     /**
-     * Handle renewal order creation.
+     * Keep simple subscription products on the CiviCRM settings panel.
+     *
+     * WooCommerce Subscriptions shows the simple-product panel for the
+     * subscription type, but WPCV drops those fields unless the type is listed.
+     * Hooked to both option_* and default_option_* because an unsaved option
+     * never runs the option_* filter.
+     *
+     * @param mixed $types Product types that show the CiviCRM settings panel.
+     * @return array
+     */
+    public function include_subscription_product_type( $types ) {
+        if ( ! is_array( $types ) ) {
+            $types = array( 'simple' );
+        }
+
+        if ( ! in_array( 'subscription', $types, true ) ) {
+            $types[] = 'subscription';
+        }
+
+        return $types;
+    }
+
+    /**
+     * Remove the parent contribution id from data copied onto a subscription or renewal.
+     *
+     * @param array $data Order meta being copied.
+     * @return array
+     */
+    public function exclude_civicrm_contribution_meta( $data ) {
+        if ( ! is_array( $data ) ) {
+            return $data;
+        }
+
+        unset( $data[ self::CONTRIBUTION_META_KEY ] );
+
+        return $data;
+    }
+
+    /**
+     * Create a new CiviCRM contribution for a subscription renewal order.
+     *
+     * The product's membership settings are included as a membership line item,
+     * so CiviCRM creates a new membership. Payment completion then runs the
+     * existing membership date adjustment.
      *
      * @param WC_Order        $renewal_order The renewal order object.
      * @param WC_Subscription $subscription  The subscription object.
      * @return WC_Order The renewal order object (required for filters).
      */
     public function handle_renewal_order_created( $renewal_order, $subscription = null ) {
-        error_log( sprintf( 'WCS CiviCRM Bridge: Called handle_renewal_order_created for renewal order #%d from subscription #%d', 
-        $renewal_order->get_id(), $subscription ? $subscription->get_id() : 'N/A' ) );
-        
-        // Use WPCV function to create/update contribution
-        $contribution = WPCV_WCI()->contribution->create_from_order( $renewal_order );
-        
-        if ( $contribution ) {
-            error_log( sprintf( 'WCS CiviCRM Bridge: Created/updated CiviCRM contribution #%d for renewal order #%d', 
-                $contribution['id'], $renewal_order->get_id() ) );
-        } else {
-            error_log( sprintf( 'WCS CiviCRM Bridge: Failed to create/update CiviCRM contribution for renewal order #%d', $renewal_order->get_id() ) );
+        if ( ! $renewal_order instanceof WC_Order ) {
+            return $renewal_order;
         }
-        
-        // IMPORTANT: Must return the order object since this is a filter
+
+        if ( ! function_exists( 'wcs_order_contains_renewal' ) || ! wcs_order_contains_renewal( $renewal_order ) ) {
+            return $renewal_order;
+        }
+
+        // A copied parent contribution id would record this payment on the original membership.
+        if ( $renewal_order->get_meta( self::CONTRIBUTION_META_KEY ) ) {
+            $renewal_order->delete_meta_data( self::CONTRIBUTION_META_KEY );
+            $renewal_order->save();
+        }
+
+        error_log(
+            sprintf(
+                'WCS CiviCRM Bridge: Called handle_renewal_order_created for renewal order #%d from subscription #%d',
+                $renewal_order->get_id(),
+                $subscription ? $subscription->get_id() : 'N/A'
+            )
+        );
+
+        $contribution = WPCV_WCI()->contribution->create_from_order( $renewal_order );
+
+        if ( $contribution ) {
+            error_log(
+                sprintf(
+                    'WCS CiviCRM Bridge: Created/updated CiviCRM contribution #%d for renewal order #%d',
+                    $contribution['id'],
+                    $renewal_order->get_id()
+                )
+            );
+        } else {
+            error_log(
+                sprintf(
+                    'WCS CiviCRM Bridge: Failed to create/update CiviCRM contribution for renewal order #%d',
+                    $renewal_order->get_id()
+                )
+            );
+        }
+
         return $renewal_order;
     }
 
