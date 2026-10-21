@@ -47,6 +47,15 @@ class WCS_CiviCRM_Bridge {
     private static $instance = null;
 
     /**
+     * WPCV checkout flags saved while a subscription order is first saved.
+     *
+     * Null when sync is not suppressed.
+     *
+     * @var array|null
+     */
+    private $suppressed_flags = null;
+
+    /**
      * Get single instance of the class.
      *
      * @return WCS_CiviCRM_Bridge
@@ -136,6 +145,78 @@ class WCS_CiviCRM_Bridge {
 
         // Renewal orders are fully built, including line items, before this fires.
         add_filter( 'wcs_renewal_order_created', array( $this, 'handle_renewal_order_created' ), 10, 2 );
+
+        // The first save of a subscription order has no billing data or renewal
+        // link yet. Pause WPCV around that hook so it does not create a contact.
+        add_action( 'woocommerce_new_order', array( $this, 'suppress_wpcv_new_order_sync' ), 5, 2 );
+        add_action( 'woocommerce_new_order', array( $this, 'restore_wpcv_new_order_sync' ), 99, 2 );
+    }
+
+    /**
+     * Stop WPCV treating the first save of a subscription order as a new contact.
+     *
+     * WooCommerce Subscriptions saves the order before billing details, line
+     * items, or the renewal relationship exist. Both WPCV new-order handlers
+     * return early while their checkout flags are set.
+     *
+     * @param int           $order_id Order ID.
+     * @param WC_Order|null $order    Order, when WooCommerce passes it.
+     */
+    public function suppress_wpcv_new_order_sync( $order_id, $order = null ) {
+        if ( null !== $this->suppressed_flags ) {
+            return;
+        }
+
+        if ( ! $order instanceof WC_Order ) {
+            $order = function_exists( 'wc_get_order' ) ? wc_get_order( $order_id ) : null;
+        }
+
+        if ( ! $order instanceof WC_Order || 'subscription' !== $order->get_created_via() ) {
+            return;
+        }
+
+        if ( ! function_exists( 'WPCV_WCI' ) ) {
+            return;
+        }
+
+        $wpcv = WPCV_WCI();
+        if ( empty( $wpcv->contact ) || empty( $wpcv->order ) ) {
+            return;
+        }
+
+        $this->suppressed_flags = array(
+            'contact' => (bool) $wpcv->contact->is_checkout,
+            'order'   => (bool) $wpcv->order->is_checkout,
+        );
+
+        $wpcv->contact->is_checkout = true;
+        $wpcv->order->is_checkout   = true;
+
+        error_log(
+            sprintf(
+                'WCS CiviCRM Bridge: Skipped WPCV contact sync for new subscription order #%d',
+                $order->get_id()
+            )
+        );
+    }
+
+    /**
+     * Restore the WPCV checkout flags after the new-order hook.
+     */
+    public function restore_wpcv_new_order_sync() {
+        if ( null === $this->suppressed_flags || ! function_exists( 'WPCV_WCI' ) ) {
+            return;
+        }
+
+        $wpcv = WPCV_WCI();
+        if ( ! empty( $wpcv->contact ) ) {
+            $wpcv->contact->is_checkout = $this->suppressed_flags['contact'];
+        }
+        if ( ! empty( $wpcv->order ) ) {
+            $wpcv->order->is_checkout = $this->suppressed_flags['order'];
+        }
+
+        $this->suppressed_flags = null;
     }
 
     /**
@@ -211,7 +292,18 @@ class WCS_CiviCRM_Bridge {
             )
         );
 
-        $contribution = WPCV_WCI()->contribution->create_from_order( $renewal_order );
+        // Renewals are not checkout orders. WPCV only consults UFMatch when
+        // is_checkout is set, and only after an email lookup misses. A matching
+        // but wrong email is corrected later by the contribution params filter.
+        $contact_handler = WPCV_WCI()->contact;
+        $was_checkout    = (bool) $contact_handler->is_checkout;
+        $contact_handler->is_checkout = true;
+
+        try {
+            $contribution = WPCV_WCI()->contribution->create_from_order( $renewal_order );
+        } finally {
+            $contact_handler->is_checkout = $was_checkout;
+        }
 
         if ( $contribution ) {
             error_log(
